@@ -1,95 +1,125 @@
 # scrap-king-smart-iot
 
-A Windows service for the yard PC. It reads the truck scales and the scale
-camera and streams them to Scrap King Smart at:
+Streams the yard's truck scales and scale camera to the New Log page of Scrap King
+Smart. It is one PowerShell script, `scrap-king-iot.ps1`, and its settings,
+`config.json`. It runs on the yard PC with the PowerShell built into Windows, so
+there is nothing else to install.
 
 | Web app | `endpoint` in `config.json` |
 | --- | --- |
+| Testing (the default) | `https://dev.scrapkingsmart.com/api/iot` |
 | Production | `https://scrapkingsmart.com/api/iot` |
-| Testing | `https://dev.scrapkingsmart.com/api/iot` |
 
 ## Install
 
-You need an Administrator account on the yard PC, and the addresses of the
-scales and the camera.
+Do this on the yard PC that runs ScrapRight's IoT Agent. At AMR North that is the
+Dell in the scale house. You need an Administrator account.
 
-1. **Copy the files.** Create `C:\Program Files\ScrapKingSmartIoT\` and copy
-   `scrap-king-smart-iot.exe` into it. Copy `config.example.json` beside it and
-   rename the copy to `config.json`.
+1. **Get the files.** Sign in to GitHub and open this repository. Click
+   **Code**, then **Download ZIP**, and unzip it anywhere, for example in Downloads.
 
-2. **Open Command Prompt as Administrator** (Start, type `cmd`, right-click,
-   *Run as administrator*) and go to the folder. Every command below runs here.
+2. **Check `config.json`.** It is already set up for AMR North on the testing site.
+   For production, change `endpoint` (see the table above). The fields are explained
+   [below](#configjson).
 
-   ```bat
-   cd "C:\Program Files\ScrapKingSmartIoT"
+3. **Run the script.** Right-click `scrap-king-iot.ps1`, choose **Run with
+   PowerShell**, and answer **Yes** when Windows asks. Or, in PowerShell opened as
+   Administrator, from the unzipped folder:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\scrap-king-iot.ps1
    ```
 
-3. **Make this PC's key.** It prints the public key, a line starting `MCow`.
-   The private key stays in `agent.key` on this PC: never copy or share it.
+   The script then:
+   - copies itself to `C:\Program Files\ScrapKingIoT`;
+   - makes this PC's key;
+   - starts the agent now and at every boot;
+   - checks it.
 
-   ```bat
-   scrap-king-smart-iot keygen
-   ```
-
-4. **Give the public key to the web app.** Add `<yard>:<public key>` to the web
-   app's `IOT_AGENT_KEYS` setting (on its ECS task definition) and redeploy it.
-   Separate yards with commas:
+   It ends by printing this PC's public key, which is also saved in
+   `C:\Program Files\ScrapKingIoT\public-key.txt`:
 
    ```
-   IOT_AGENT_KEYS=amr-north:MCowBQYDK2VwAyEAop8rkkhzqnyt7N1kZIJp18Os+TFHy+L4jZy+FEyCgvI=
+   amr-north:MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
    ```
 
-   `scrap-king-smart-iot pubkey` prints the public key again.
+4. **Give the key to the web app (once).** Add that whole line to the
+   `IOT_AGENT_KEYS` environment variable in the web app's ECS task definition (the
+   testing one or the production one, to match `endpoint`), then deploy. If you
+   have more than one yard, separate the lines with commas. The key stays the same
+   every time you install again, so you only do this once per PC.
 
-5. **Edit `config.json`** in Notepad (as Administrator):
-   - `agentId`: the yard, exactly as in the web app's addresses: `amr-north`,
-     `amr-south` or `scrap-king`. It must match the name used in step 4.
-   - `endpoint`: from the table above.
-   - `scales`: each scale's port on the serial device server (`address`), or,
-     for a scale cabled to this PC, `"serial": { "port": "COM5" }` instead.
-     Leave a scale at `"enabled": false` while another program (ScrapRight)
-     still reads it: the device server lets only one program read each scale,
-     and this one would take it over.
-   - `cameras`: `snapshotUrl` returns one JPEG (Axis:
-     `http://<camera ip>/axis-cgi/jpg/image.cgi?resolution=640x480`; Hikvision:
-     `http://<camera ip>/ISAPI/Streaming/channels/101/picture`). Add `username`
-     and `password` only if the camera asks for them.
-
-6. **Keep the PC awake** while it is plugged in, and keep Windows' automatic
-   clock setting on (the web app refuses a PC whose clock is 5 minutes off):
-
-   ```bat
-   powercfg /change standby-timeout-ac 0
-   powercfg /change hibernate-timeout-ac 0
-   ```
-
-7. **Check everything** with the one-liner below, then **install and start the
-   service**. It starts with Windows, before anyone logs in, and restarts after
-   a failure.
-
-   ```bat
-   scrap-king-smart-iot install
-   scrap-king-smart-iot start
-   ```
+5. **Check it** with the line below. Then open New Log for the yard: the scales and
+   the camera appear beside the form.
 
 ## Is it good to go?
 
-```bat
-scrap-king-smart-iot check && echo GOOD TO GO || echo NOT READY
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\ScrapKingIoT\scrap-king-iot.ps1" check
 ```
 
-It reads each enabled scale and each camera once and sends one signed report
-to the web app, so it checks the wiring, the key, the endpoint and the clock
-together. Each line says `ok` or `FAIL` with the reason:
-
 ```
-  ok    scale inbound-1    tcp://192.168.1.12:10001: 2840 lb gross, ok
-  skip  scale outbound-2   tcp://192.168.1.12:10002 (disabled)
-  ok    camera scale-camera live: 640x480, 30 KB
-  ok    endpoint: report accepted
+  ok    web app             https://dev.scrapkingsmart.com/api/iot
+  ok    scale inbound-1     2840 lb gross, ok
+  ok    scale outbound-2    0 lb gross, ok
+  ok    camera scale-camera  35 KB picture
 GOOD TO GO
 ```
 
-Once the service is installed, run `scrap-king-smart-iot stop` first and
-`scrap-king-smart-iot start` after: while the service runs it holds the scales,
-and `check` is turned away from them.
+It ends with `GOOD TO GO` (exit code 0) or `NOT READY` (exit code 1). When it is
+not ready, a `FAIL` line says why:
+
+| `FAIL` line says | Do this |
+| --- | --- |
+| `No public key is set for this agent` | Do step 4, or wait for its deploy to finish |
+| `No connection from this PC to 192.168.1.12. Is ScrapRight's IoT Agent running?` | Start ScrapRight's IoT Agent. This script hears the scales through ScrapRight's own connection |
+| `The camera did not answer` | Open the camera's `snapshotUrl` in a browser on this PC |
+| `not running` | Read `C:\Program Files\ScrapKingIoT\agent.log` |
+| `This PC's clock is more than 5 minutes off` | Turn on *Set time automatically* in Windows' date and time settings |
+
+## Changing settings
+
+Edit `config.json` beside the script you first ran, then run the script again. The
+key stays the same.
+
+## Uninstall
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Program Files\ScrapKingIoT\scrap-king-iot.ps1" uninstall
+```
+
+This stops the agent and deletes `C:\Program Files\ScrapKingIoT`. It keeps this
+PC's key, so installing again needs no change in the web app.
+
+## config.json
+
+| Field | What it is |
+| --- | --- |
+| `agentId` | The yard, as it appears in the web app's addresses: `amr-north`, `amr-south` or `scrap-king` |
+| `endpoint` | The web app to send to (see the table at the top) |
+| `scales` | Each scale: an `id` (lowercase letters, digits and `-`), the `name` New Log shows, and the `address` (IP:port) of the serial device server port it is read from. `enabled: false` turns a scale off |
+| `cameras` | Each camera: an `id`, a `name`, a `snapshotUrl` that returns one JPEG, and `liveIntervalSeconds` between pictures. `enabled: false` turns a camera off |
+
+## How it works
+
+- **Scales.** The script never connects to the serial device server.
+  - ScrapRight's IoT Agent keeps its connections to the device server, as it
+    always has. Windows gives this script a copy of the readings arriving at this
+    PC for those connections (the same thing `pktmon` showed).
+  - ScrapRight works exactly as before.
+  - This script hears the scales only while ScrapRight's agent is connected.
+- **The web app.** Once, the script signs a handshake with this PC's private key
+  and gets a token back.
+  - The private key lives in the Windows key store and cannot be copied off this
+    PC.
+  - Every event after that carries only the token, over one HTTPS connection that
+    stays open.
+- **What it sends.**
+  - A scale's weight, when it changes (at most 4 times a second) and every
+    5 seconds even if it doesn't.
+  - A camera picture every `liveIntervalSeconds`. A picture is about 35 KB, so one
+    a second uses about 3 GB of the yard's upload a day.
+  - Nothing is stored on the way: New Log shows each event as it arrives.
+- **Staying up.** Task Scheduler starts the script as SYSTEM at boot and checks
+  every minute that it is still running.
+- **The log** is in `C:\Program Files\ScrapKingIoT\agent.log`.
