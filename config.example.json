@@ -1,6 +1,6 @@
 {
-  "agentId": "yard-1",
-  "endpoint": "https://your-app.example.com/api/iot",
+  "agentId": "amr-north",
+  "endpoint": "https://scrapkingsmart.com/api/iot",
   "keyFile": "agent.key",
   "heartbeatSeconds": 5,
   "sendEveryMs": 250,
