@@ -50,7 +50,7 @@ Dell in the scale house. You need an Administrator account.
    every time you install again, so you only do this once per PC.
 
 5. **Check it** with the line below. Then open New Log for the yard: the scales and
-   the camera appear beside the form.
+   the camera appear beside the form on a wide screen, below it on a narrower one.
 
 ## Is it good to go?
 
@@ -59,7 +59,7 @@ powershell -ExecutionPolicy Bypass -File "C:\Program Files\ScrapKingIoT\scrap-ki
 ```
 
 ```
-  ok    web app             https://dev.scrapkingsmart.com/api/iot
+  ok    web app             https://dev.scrapkingsmart.com/api/iot: nobody watching, sending nothing
   ok    scale inbound-1     2840 lb gross, ok
   ok    scale outbound-2    0 lb gross, ok
   ok    camera scale-camera  35 KB picture
@@ -112,13 +112,22 @@ PC's key, so installing again needs no change in the web app.
   and gets a token back.
   - The private key lives in the Windows key store and cannot be copied off this
     PC.
-  - Every event after that carries only the token, over one HTTPS connection that
-    stays open.
-- **What it sends.**
-  - A scale's weight, when it changes (at most 4 times a second) and every
-    5 seconds even if it doesn't.
-  - A camera picture every `liveIntervalSeconds`. A picture is about 35 KB, so one
-    a second uses about 3 GB of the yard's upload a day.
+  - Every request after that carries only the token, over HTTPS connections that
+    stay open.
+- **What it sends, and when.**
+  - **While nobody has the yard's New Log open, nothing.** It only keeps one small
+    question open with the web app, "is anyone watching?", asked again every
+    25 seconds.
+  - **As soon as someone opens New Log,** the web app answers and the script
+    starts sending:
+    - each scale's weight when it changes (at most 4 times a second), and every
+      5 seconds even if it doesn't;
+    - a camera picture every `liveIntervalSeconds`. A picture is about 35 KB.
+  - **When the last New Log page closes, or its browser tab is hidden,** it stops
+    and goes back to waiting.
+  - The scales are still read the whole time, from this PC's own network
+    traffic. The camera is checked once a minute over the yard network, so
+    `check` stays truthful. Neither uploads anything.
   - Nothing is stored on the way: New Log shows each event as it arrives.
 - **Staying up.** Task Scheduler starts the script as SYSTEM at boot and checks
   every minute that it is still running.

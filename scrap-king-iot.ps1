@@ -18,8 +18,12 @@
   server itself, so it cannot take a scale away from ScrapRight.
 
   The web app is told who this is once: the script signs a handshake with this
-  PC's private key, kept in the Windows key store, and gets a token. Each event
-  after that carries only the token, over one HTTPS connection kept open.
+  PC's private key, kept in the Windows key store, and gets a token. Each request
+  after that carries only the token, over HTTPS connections kept open.
+
+  Nothing is uploaded while nobody has the yard's New Log open. The script
+  only asks, with one request the web app holds open, and starts sending the
+  moment someone opens the page.
 #>
 param(
   [ValidateSet('install', 'check', 'uninstall', 'run')]
@@ -27,7 +31,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '2.0.0'
+$Version = '2.1.0'
 $TaskName = 'Scrap King IoT'
 $KeyName = 'ScrapKingIoT'
 # The 64-bit Program Files, even when a 32-bit PowerShell runs the install.
@@ -95,7 +99,7 @@ function Read-Config([string]$path) {
       if ($cam.liveIntervalSeconds -gt 0) { $every = [double]$cam.liveIntervalSeconds }
       @{
         id = $cam.id; name = "$($cam.name)"; url = $cam.snapshotUrl; everyMs = [int64]($every * 1000)
-        sentAt = [int64]-100000; ok = $false; detail = 'not asked yet'
+        askedAt = [int64]-100000; ok = $false; detail = 'not asked yet'
       }
     })
   if ($scales.Count + $cameras.Count -eq 0) { throw 'config.json: no scale or camera is enabled.' }
@@ -200,7 +204,50 @@ function Send-Event([string]$query, [byte[]]$bytes, [string]$type) {
     if ($response.status -ne 401) { break }
     $script:Token = $null
   }
-  if ($response.status -ne 204) { throw "The web app refused an event: $($response.reason)" }
+  if ($response.status -ne 200) { throw "The web app refused an event: $($response.reason)" }
+  if (-not ($response.body | ConvertFrom-Json).watching) { Set-Watching $false }
+}
+
+# While nobody has the yard's New Log open, this question is all the agent
+# sends: is anyone watching? The web app holds it open for up to 25 s and
+# answers the moment a page opens. It is asked without blocking the loop, so
+# the scales are still read meanwhile.
+function Wait-ForWatcher {
+  if ($null -eq $script:WatchTask) {
+    if (-not $script:Token) { Open-Session }
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, "$($Config.endpoint)/watch")
+    $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $script:Token)
+    $script:WatchTask = $script:WatchHttp.SendAsync($request)
+    return
+  }
+  if (-not $script:WatchTask.IsCompleted) { return }
+  $task = $script:WatchTask
+  $script:WatchTask = $null
+  if ($task.IsFaulted -or $task.IsCanceled) {
+    $why = 'no answer in time'
+    if ($task.Exception) { $why = $task.Exception.GetBaseException().Message }
+    throw "Cannot reach $($Config.endpoint): $why"
+  }
+  $response = $task.Result
+  $status = [int]$response.StatusCode
+  $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+  $response.Dispose()
+  if ($status -eq 401) { $script:Token = $null; return } # the web app restarted: shake hands again
+  if ($status -ne 200) { throw "The web app refused this PC's question: HTTP $status" }
+  if (($text | ConvertFrom-Json).watching) { Set-Watching $true }
+}
+
+function Set-Watching([bool]$watching) {
+  if ($watching -eq $script:Watching) { return }
+  $script:Watching = $watching
+  if ($watching) {
+    Write-Log 'Someone opened New Log: sending'
+    # Everything at once, so the page fills straight away.
+    foreach ($s in $Config.scales) { $s.sentAt = [int64]-100000 }
+    foreach ($cam in $Config.cameras) { $cam.askedAt = [int64]-100000 }
+  } else {
+    Write-Log 'Nobody is watching: sending nothing'
+  }
 }
 
 # --- The scales ----------------------------------------------------------------
@@ -310,6 +357,7 @@ function Add-Bytes($scale, [int64]$seq, [byte[]]$p, [int]$start, [int]$length, [
 
 function Send-Weights([int64]$now) {
   foreach ($s in $Config.scales) {
+    if (-not $script:Watching) { return }
     if ($s.heardAt -lt 0 -or $now - $s.heardAt -gt $QuietAfterMs) { continue }
     $key = "$($s.weight)|$($s.unit)|$($s.mode)|$($s.status)"
     $since = $now - $s.sentAt
@@ -324,10 +372,16 @@ function Send-Weights([int64]$now) {
 
 # --- The camera ----------------------------------------------------------------
 
-function Send-Pictures([int64]$now) {
+# While someone watches, each camera is asked for a picture every
+# liveIntervalSeconds and the picture is sent. Otherwise it is asked once a
+# minute, on this network only, so the check can say whether it works; nothing
+# is uploaded.
+function Update-Cameras([int64]$now) {
   foreach ($cam in $Config.cameras) {
-    if ($now - $cam.sentAt -lt $cam.everyMs) { continue }
-    $cam.sentAt = $now
+    $every = 60000
+    if ($script:Watching) { $every = $cam.everyMs }
+    if ($now - $cam.askedAt -lt $every) { continue }
+    $cam.askedAt = $now
     try {
       $jpeg = $script:CameraHttp.GetByteArrayAsync($cam.url).GetAwaiter().GetResult()
     } catch {
@@ -337,8 +391,10 @@ function Send-Pictures([int64]$now) {
     }
     $cam.ok = $true
     $cam.detail = '{0:N0} KB picture' -f ($jpeg.Length / 1KB)
-    $query = "?camera=$($cam.id)&name=$([Uri]::EscapeDataString($cam.name))"
-    Send-Event $query $jpeg 'image/jpeg'
+    if ($script:Watching) {
+      $query = "?camera=$($cam.id)&name=$([Uri]::EscapeDataString($cam.name))"
+      Send-Event $query $jpeg 'image/jpeg'
+    }
   }
 }
 
@@ -347,7 +403,8 @@ function Send-Pictures([int64]$now) {
 function Write-Status([int64]$now) {
   $lines = New-Object System.Collections.ArrayList
   if ($script:WebAppProblem) { $web = @{ ok = $false; detail = $script:WebAppProblem } }
-  elseif ($script:Token) { $web = @{ ok = $true; detail = $Config.endpoint } }
+  elseif ($script:Token -and $script:Watching) { $web = @{ ok = $true; detail = "$($Config.endpoint): New Log is open, sending" } }
+  elseif ($script:Token) { $web = @{ ok = $true; detail = "$($Config.endpoint): nobody watching, sending nothing" } }
   else { $web = @{ ok = $false; detail = 'not connected yet' } }
   [void]$lines.Add(@{ what = 'web app'; ok = $web.ok; detail = $web.detail })
 
@@ -385,6 +442,10 @@ function Start-Agent {
   $script:Signer = [Security.Cryptography.ECDsaCng]::new((Get-AgentKey))
   $script:Http = New-HttpClient 10
   $script:CameraHttp = New-HttpClient 3
+  # Longer than the 25 s the web app holds a question about watching.
+  $script:WatchHttp = New-HttpClient 40
+  $script:WatchTask = $null
+  $script:Watching = $false
   $script:Packet = New-Object byte[] 65535
   $script:Token = $null
   $script:WebAppProblem = $null
@@ -427,8 +488,8 @@ function Start-Agent {
 
     if ($now -ge $holdUntil) {
       try {
-        Send-Weights $now
-        Send-Pictures $now
+        if ($script:Watching) { Send-Weights $now } else { Wait-ForWatcher }
+        Update-Cameras $now
         if ($script:WebAppProblem) { Write-Log 'The web app is taking events again.' }
         $script:WebAppProblem = $null
       } catch {
