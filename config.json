@@ -1,0 +1,27 @@
+{
+  "agentId": "amr-north",
+  "endpoint": "https://dev.scrapkingsmart.com/api/iot",
+  "scales": [
+    {
+      "id": "inbound-1",
+      "name": "Inbound Scale 1",
+      "enabled": true,
+      "address": "192.168.1.12:10001"
+    },
+    {
+      "id": "outbound-2",
+      "name": "Outbound Scale 2",
+      "enabled": true,
+      "address": "192.168.1.12:10002"
+    }
+  ],
+  "cameras": [
+    {
+      "id": "scale-camera",
+      "name": "Scale camera",
+      "enabled": true,
+      "snapshotUrl": "http://192.168.1.222/axis-cgi/jpg/image.cgi?resolution=640x480",
+      "liveIntervalSeconds": 1
+    }
+  ]
+}
