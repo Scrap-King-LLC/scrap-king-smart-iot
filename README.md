@@ -98,7 +98,7 @@ PC's key, so installing again needs no change in the web app.
 | `agentId` | The yard, as it appears in the web app's addresses: `amr-north`, `amr-south` or `scrap-king` |
 | `endpoint` | The web app to send to (see the table at the top) |
 | `scales` | Each scale: an `id` (lowercase letters, digits and `-`), the `name` New Log shows, and the `address` (IP:port) of the serial device server port it is read from. `enabled: false` turns a scale off |
-| `cameras` | Each camera: an `id`, a `name`, a `snapshotUrl` that returns one JPEG, and `liveIntervalSeconds` between pictures. `enabled: false` turns a camera off |
+| `cameras` | Each camera: an `id`, a `name`, a `snapshotUrl` that returns one JPEG for the live view, a `captureUrl` for the full-size picture stored with each ticket (1920x1080; the `snapshotUrl` if left out), and `liveIntervalSeconds` between live pictures. `enabled: false` turns a camera off |
 
 ## How it works
 
@@ -123,6 +123,9 @@ PC's key, so installing again needs no change in the web app.
     - each scale's weight when it changes (at most 4 times a second), and every
       5 seconds even if it doesn't;
     - a camera picture every `liveIntervalSeconds`. A picture is about 35 KB.
+  - **When a ticket is logged,** the web app asks for one full-size picture
+    (`captureUrl`, a few hundred KB) and stores it with the ticket. With several
+    cameras, the first one is used.
   - **When the last New Log page closes, or its browser tab is hidden,** it stops
     and goes back to waiting.
   - The scales are still read the whole time, from this PC's own network

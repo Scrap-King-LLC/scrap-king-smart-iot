@@ -21,6 +21,7 @@
       "name": "Scale camera",
       "enabled": true,
       "snapshotUrl": "http://192.168.1.222/axis-cgi/jpg/image.cgi?resolution=640x480",
+      "captureUrl": "http://192.168.1.222/axis-cgi/jpg/image.cgi?resolution=1920x1080",
       "liveIntervalSeconds": 1
     }
   ]

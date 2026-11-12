@@ -24,6 +24,10 @@
   Nothing is uploaded while nobody has the yard's New Log open. The script
   only asks, with one request the web app holds open, and starts sending the
   moment someone opens the page.
+
+  When a ticket is logged, the web app asks for the scale camera's full-size
+  picture in an event's answer; the script takes it from the camera's
+  captureUrl and sends it, and the web app stores it with the ticket.
 #>
 param(
   [ValidateSet('install', 'check', 'uninstall', 'run')]
@@ -31,7 +35,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Version = '2.1.0'
+$Version = '2.2.0'
 $TaskName = 'Scrap King IoT'
 $KeyName = 'ScrapKingIoT'
 # The 64-bit Program Files, even when a 32-bit PowerShell runs the install.
@@ -95,10 +99,15 @@ function Read-Config([string]$path) {
       if ($null -eq $cam -or $cam.enabled -eq $false) { continue }
       if ($cam.id -cnotmatch $id -or -not $cam.name) { throw "config.json: each camera needs an id like scale-camera and a name." }
       if ($cam.snapshotUrl -notmatch '^https?://') { throw "config.json: camera $($cam.id): snapshotUrl must be the camera's http:// picture address." }
+      $capture = $cam.snapshotUrl
+      if ($cam.captureUrl) {
+        if ($cam.captureUrl -notmatch '^https?://') { throw "config.json: camera $($cam.id): captureUrl must be the camera's http:// picture address." }
+        $capture = $cam.captureUrl
+      }
       $every = 1
       if ($cam.liveIntervalSeconds -gt 0) { $every = [double]$cam.liveIntervalSeconds }
       @{
-        id = $cam.id; name = "$($cam.name)"; url = $cam.snapshotUrl; everyMs = [int64]($every * 1000)
+        id = $cam.id; name = "$($cam.name)"; url = $cam.snapshotUrl; captureUrl = $capture; everyMs = [int64]($every * 1000)
         askedAt = [int64]-100000; ok = $false; detail = 'not asked yet'
       }
     })
@@ -191,21 +200,51 @@ function Open-Session {
   Write-Log "Connected to $($Config.endpoint)"
 }
 
-# Sends one event. A 401 means the web app restarted or the token lapsed:
-# shake hands again and resend, once.
-function Send-Event([string]$query, [byte[]]$bytes, [string]$type) {
+# Posts to the web app with the token. A 401 means the web app restarted or
+# the token lapsed: shake hands again and post again, once.
+function Send-Body([string]$path, [byte[]]$bytes, [string]$type) {
   for ($attempt = 1; $attempt -le 2; $attempt++) {
     if (-not $script:Token) { Open-Session }
-    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, "$($Config.endpoint)/events$query")
+    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, "$($Config.endpoint)$path")
     $request.Headers.Authorization = [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $script:Token)
     $request.Content = [System.Net.Http.ByteArrayContent]::new($bytes)
     $request.Content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new($type)
     $response = Invoke-Http $request
-    if ($response.status -ne 401) { break }
+    if ($response.status -ne 401) { return $response }
     $script:Token = $null
   }
+  return $response
+}
+
+# Sends one event. Its answer says whether anyone still watches, and which
+# full-size pictures logged tickets are waiting for.
+function Send-Event([string]$query, [byte[]]$bytes, [string]$type) {
+  $response = Send-Body "/events$query" $bytes $type
   if ($response.status -ne 200) { throw "The web app refused an event: $($response.reason)" }
-  if (-not ($response.body | ConvertFrom-Json).watching) { Set-Watching $false }
+  $answer = $response.body | ConvertFrom-Json
+  foreach ($id in @($answer.capture)) { if ($id) { [void]$script:Captures.Add([string]$id) } }
+  if (-not $answer.watching) { Set-Watching $false }
+}
+
+# A ticket was just logged: its full-size picture, from the first camera, for
+# the web app to store with it. One that fails is logged and given up: the
+# ticket is saved without it, and the save is not kept waiting.
+function Send-Captures {
+  if ($script:Captures.Count -eq 0) { return }
+  $ids = $script:Captures.ToArray()
+  $script:Captures.Clear()
+  $cam = $Config.cameras | Select-Object -First 1
+  foreach ($id in $ids) {
+    try {
+      if (-not $cam) { throw 'no camera is enabled' }
+      $jpeg = $script:CaptureHttp.GetByteArrayAsync($cam.captureUrl).GetAwaiter().GetResult()
+      $response = Send-Body "/capture?id=$([Uri]::EscapeDataString($id))" $jpeg 'image/jpeg'
+      if ($response.status -ne 204) { throw "the web app answered $($response.reason)" }
+      Write-Log ('Sent the {0:N0} KB picture for ticket {1}' -f ($jpeg.Length / 1KB), $id)
+    } catch {
+      Write-Log "No picture for ticket ${id}: $(Get-Reason $_)"
+    }
+  }
 }
 
 # While nobody has the yard's New Log open, this question is all the agent
@@ -442,6 +481,9 @@ function Start-Agent {
   $script:Signer = [Security.Cryptography.ECDsaCng]::new((Get-AgentKey))
   $script:Http = New-HttpClient 10
   $script:CameraHttp = New-HttpClient 3
+  # A full-size picture is larger and a ticket is waiting on it: a little longer.
+  $script:CaptureHttp = New-HttpClient 6
+  $script:Captures = New-Object System.Collections.Generic.List[string]
   # Longer than the 25 s the web app holds a question about watching.
   $script:WatchHttp = New-HttpClient 40
   $script:WatchTask = $null
@@ -490,6 +532,7 @@ function Start-Agent {
       try {
         if ($script:Watching) { Send-Weights $now } else { Wait-ForWatcher }
         Update-Cameras $now
+        Send-Captures
         if ($script:WebAppProblem) { Write-Log 'The web app is taking events again.' }
         $script:WebAppProblem = $null
       } catch {
